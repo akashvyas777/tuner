@@ -2,11 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Counter</title>
+<title>Pro Tuner</title>
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#111111">
 
 <style>
 body {
@@ -21,10 +19,6 @@ body {
   text-align: center;
 }
 
-#container {
-  width: 90%;
-}
-
 #note {
   font-size: 80px;
   font-weight: bold;
@@ -36,9 +30,9 @@ body {
 
 #meter {
   width: 100%;
-  height: 10px;
+  height: 12px;
   background: #333;
-  margin-top: 20px;
+  margin-top: 25px;
   position: relative;
 }
 
@@ -49,13 +43,14 @@ body {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  transition: left 0.05s linear;
 }
 </style>
 </head>
 
 <body>
 
-<div id="container">
+<div>
   <div id="note">--</div>
   <div id="freq">0 Hz</div>
   <div id="meter">
@@ -64,69 +59,41 @@ body {
 </div>
 
 <script>
-let audioContext;
-let analyser;
-let microphone;
+let audioContext, analyser, mic;
 
 const noteEl = document.getElementById("note");
 const freqEl = document.getElementById("freq");
 const needle = document.getElementById("needle");
 
-// Note mapping
-const noteStrings = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const noteStrings = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 
-function getNote(frequency) {
-  const A4 = 440;
-  const noteNumber = 12 * (Math.log2(frequency / A4)) + 69;
-  return Math.round(noteNumber);
+let smoothFreq = 0;
+
+// NOTE FUNCTIONS
+function getNote(freq) {
+  return Math.round(12 * Math.log2(freq / 440) + 69);
 }
 
-function getFrequency(note) {
+function getFreq(note) {
   return 440 * Math.pow(2, (note - 69) / 12);
 }
 
-function updatePitch() {
-  const buffer = new Float32Array(analyser.fftSize);
-  analyser.getFloatTimeDomainData(buffer);
-
-  let sum = 0;
-  for (let i = 0; i < buffer.length; i++) {
-    sum += buffer[i] * buffer[i];
-  }
-  let rms = Math.sqrt(sum / buffer.length);
-
-  if (rms < 0.01) {
-    requestAnimationFrame(updatePitch);
-    return;
-  }
-
-  let freq = autoCorrelate(buffer, audioContext.sampleRate);
-
-  if (freq !== -1) {
-    const noteNum = getNote(freq);
-    const noteName = noteStrings[noteNum % 12];
-    const targetFreq = getFrequency(noteNum);
-
-    let cents = 1200 * Math.log2(freq / targetFreq);
-
-    noteEl.textContent = noteName;
-    freqEl.textContent = freq.toFixed(2) + " Hz";
-
-    // Move needle (-50 to +50 cents)
-    let pos = Math.max(-50, Math.min(50, cents));
-    needle.style.left = (50 + pos) + "%";
-  }
-
-  requestAnimationFrame(updatePitch);
-}
-
-// Basic autocorrelation
+// IMPROVED AUTOCORRELATION
 function autoCorrelate(buffer, sampleRate) {
   let SIZE = buffer.length;
+  let rms = 0;
+
+  for (let i = 0; i < SIZE; i++) {
+    rms += buffer[i] * buffer[i];
+  }
+  rms = Math.sqrt(rms / SIZE);
+
+  if (rms < 0.01) return -1;
+
   let bestOffset = -1;
   let bestCorrelation = 0;
 
-  for (let offset = 8; offset < 1000; offset++) {
+  for (let offset = 20; offset < 1000; offset++) {
     let correlation = 0;
 
     for (let i = 0; i < SIZE - offset; i++) {
@@ -142,28 +109,82 @@ function autoCorrelate(buffer, sampleRate) {
   }
 
   if (bestCorrelation > 0.01) {
-    return sampleRate / bestOffset;
+    // 🔥 Peak interpolation (more accuracy)
+    let x1 = bestOffset - 1;
+    let x2 = bestOffset;
+    let x3 = bestOffset + 1;
+
+    let y1 = correlationAt(buffer, x1);
+    let y2 = correlationAt(buffer, x2);
+    let y3 = correlationAt(buffer, x3);
+
+    let shift = (y3 - y1) / (2 * (2 * y2 - y1 - y3));
+    let refined = bestOffset + shift;
+
+    return sampleRate / refined;
   }
 
   return -1;
 }
 
-// Start mic
+function correlationAt(buffer, offset) {
+  let sum = 0;
+  for (let i = 0; i < buffer.length - offset; i++) {
+    sum += buffer[i] * buffer[i + offset];
+  }
+  return sum / buffer.length;
+}
+
+// MAIN LOOP
+function update() {
+  let buffer = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buffer);
+
+  let freq = autoCorrelate(buffer, audioContext.sampleRate);
+
+  if (freq !== -1) {
+
+    // 🔥 smoothing
+    smoothFreq = smoothFreq * 0.8 + freq * 0.2;
+
+    let noteNum = getNote(smoothFreq);
+    let noteName = noteStrings[noteNum % 12];
+    let target = getFreq(noteNum);
+
+    let cents = 1200 * Math.log2(smoothFreq / target);
+
+    noteEl.textContent = noteName;
+    freqEl.textContent = smoothFreq.toFixed(2) + " Hz";
+
+    let clamped = Math.max(-50, Math.min(50, cents));
+    needle.style.left = (50 + clamped) + "%";
+
+    // 🎯 IN-TUNE COLOR
+    if (Math.abs(cents) < 2) {
+      needle.style.background = "#00ff00"; // green
+    } else {
+      needle.style.background = "#00ffcc"; // default
+    }
+  }
+
+  requestAnimationFrame(update);
+}
+
+// START AUDIO
 async function start() {
   audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-  microphone = audioContext.createMediaStreamSource(stream);
+  mic = audioContext.createMediaStreamSource(stream);
   analyser = audioContext.createAnalyser();
-  analyser.fftSize = 2048;
 
-  microphone.connect(analyser);
+  analyser.fftSize = 4096; // 🔥 higher resolution
+  mic.connect(analyser);
 
-  updatePitch();
+  update();
 }
 
-// Start on tap
 document.body.addEventListener("click", start, { once: true });
 </script>
 
